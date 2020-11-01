@@ -6,7 +6,8 @@ require 'autostager/logger'
 require 'autostager/pull_request'
 require 'autostager/timeout'
 require 'autostager/version'
-require 'octokit'
+require 'json'
+require 'rest-client'
 require 'pp'
 
 # Top-level module namespace.
@@ -15,6 +16,10 @@ module Autostager
   module_function
 
   extend Autostager::Logger
+
+  def username
+    ENV['username']
+  end
 
   def access_token
     ENV['access_token']
@@ -33,7 +38,15 @@ module Autostager
   # This is usually master in git, but
   # could also be "production" for a puppet repo.
   def default_branch
-    @client.repo(repo_slug).default_branch
+    response = RestClient::Request.new(
+      :method => :get,
+      :url => "https://#{git_server}/rest/api/1.0/projects/#{project}/repos/#{repo}/branches/default",
+      :user => username,
+      :password => access_token,
+      :verify_ssl => false
+    ).execute
+    results = JSON.parse(response.to_str)
+    results['displayId']
   end
 
   # rubocop:disable MethodLength,Metrics/AbcSize
@@ -41,45 +54,42 @@ module Autostager
     log "===> begin #{default_branch}"
     p = Autostager::PullRequest.new(
       default_branch,
-      authenticated_url("https://#{git_server}/#{repo_slug}"),
+      authenticated_url("https://#{git_server}/scm/#{repo_slug}"),
       base_dir,
       default_branch,
-      authenticated_url("https://#{git_server}/#{repo_slug}"),
+      authenticated_url("https://#{git_server}/scm/#{repo_slug}"),
     )
     p.clone unless p.staged?
     p.fetch
     return if p.rebase
-
-    # fast-forward failed, so raise awareness.
-    @client.create_issue(
-      repo_slug,
-      "Failed to fast-forward #{default_branch} branch",
-      ':bangbang: This probably means somebody force-pushed to the branch.',
-    )
   end
   # rubocop:enable MethodLength,Metrics/AbcSize
 
   # rubocop:disable MethodLength,Metrics/AbcSize
-  def process_pull(pr)
-    log "===> #{pr.number} #{clone_dir(pr)}"
-    p = Autostager::PullRequest.new(
-      pr.head.ref,
-      authenticated_url(pr.head.repo.clone_url),
+ def process_pull(pr)
+   log "#{pr['fromRef']['displayId']}"
+
+   p = Autostager::PullRequest.new(
+     pr['fromRef']['displayId'],
+      authenticated_url(pr['fromRef']['repository']['links']['clone'][0]['href']),
       base_dir,
       clone_dir(pr),
-      authenticated_url(pr.base.repo.clone_url),
+      authenticated_url(pr['fromRef']['repository']['links']['clone'][0]['href']),
     )
     if p.staged?
-      p.fetch
-      if pr.head.sha != p.local_sha
+        log "===> staged"
+        p.fetch
+      if pr['fromRef']['latestCommit'] != p.local_sha
+        log "===> reset hard"
         p.reset_hard
         add_comment = true
       else
-        log "nothing to do on #{pr.number} #{staging_dir(pr)}"
+        log "nothing to do on #{pr['id']} #{staging_dir(pr)}"
         add_comment = false
       end
       comment_or_close(p, pr, add_comment)
     else
+        log "===> clone"
       p.clone
       comment_or_close(p, pr)
     end
@@ -88,7 +98,8 @@ module Autostager
 
   # rubocop:disable MethodLength,Metrics/AbcSize
   def comment_or_close(p, pr, add_comment = true)
-    if p.up2date?("upstream/#{pr.base.repo.default_branch}")
+ 
+    if p.up2date?("upstream/#{pr['toRef']['displayId']}")
       if add_comment
         comment = format(
           ':bell: Staged `%s` at revision %s on %s',
@@ -96,7 +107,16 @@ module Autostager
           p.local_sha,
           Socket.gethostname,
         )
-        client.add_comment repo_slug, pr.number, comment
+        response = RestClient::Request.new(
+          :method => :post,
+          :url => "https://#{git_server}/rest/api/1.0/projects/#{project}/repos/#{repo}/pull-requests/#{pr['id']}/comments",
+          :user => username,
+          :password => access_token,
+          :verify_ssl => false,
+          :payload => {"text" => comment}.to_json,
+          :headers => { :accept => :json, content_type: :json }
+        ).execute
+
         log comment
       end
     else
@@ -105,15 +125,35 @@ module Autostager
         clone_dir(pr),
       )
       FileUtils.rm_rf staging_dir(pr), secure: true
-      client.add_comment repo_slug, pr.number, comment
-      client.close_issue repo_slug, pr.number
+
+
+	response = RestClient::Request.new(
+	   :method => :post,
+	   :url => "https://#{git_server}/rest/api/1.0/projects/#{project}/repos/#{repo}/pull-requests/#{pr['id']}/comments",
+	   :user => username,
+	   :password => access_token,
+	   :verify_ssl => false,
+	   :payload => {"text" => comment}.to_json,
+	   :headers => { :accept => :json, content_type: :json }
+	).execute
+
+
+	response = RestClient::Request.new(
+	   :method => :post,
+	   :url => "https://#{git_server}/rest/api/1.0/projects/#{project}/repos/#{repo}/pull-requests/#{pr['id']}/decline?version=5",
+	   :user => username,
+	   :password => access_token,
+	   :verify_ssl => false,
+	   :headers => {content_type: :json }
+	).execute
+
       log comment
     end
   end
   # rubocop:enable MethodLength,Metrics/AbcSize
 
   def authenticated_url(s)
-    s.dup.sub!(%r{^(https://)(.*)}, '\1' + access_token + '@\2')
+    s.dup.sub!(%r{^(https://)(.*)}, '\1' + username + ':' + access_token + '@\2')
   end
 
   def base_dir
@@ -121,7 +161,9 @@ module Autostager
   end
 
   def clone_dir(pr)
-    alphafy(pr.head.label)
+    alphafy ("#{pr['fromRef']['repository']['project']['owner']['slug']}:#{pr['fromRef']['displayId']}")
+    # github
+    # alphafy(pr.head.label)
   end
 
   def staging_dir(pr)
@@ -132,8 +174,12 @@ module Autostager
     ENV['repo_slug']
   end
 
-  def client
-    @client ||= Octokit::Client.new(access_token: access_token)
+  def project
+    repo_slug.split("/")[0]
+  end
+
+  def repo
+    repo_slug.split("/")[1]
   end
 
   def timeout_seconds
@@ -151,26 +197,28 @@ module Autostager
       '.',
       '..',
       'master',
+      'main',
       'production',
     ]
   end
 
   # rubocop:disable MethodLength,Metrics/AbcSize
   def run
-    Octokit.auto_paginate = true
-    user = client.user
-    user.login
+    user = username
 
     # Handle the default branch differently because
     # we only ever rebase, never force-push.
     stage_upstream
-
     # Get open PRs.
-    prs = client.pulls(repo_slug)
-
-    # Set of PR clone dirs.
-    new_clones = prs.map { |pr| clone_dir(pr) }
-
+    response = RestClient::Request.new(
+      :method => :get,
+      :url => "https://#{git_server}/rest/api/1.0/projects/#{project}/repos/#{repo}/pull-requests",
+      :user => username,
+      :password => access_token,
+      :verify_ssl => false
+    ).execute
+    prs = JSON.parse(response.to_str)
+    new_clones = prs['values'].map { |pr| clone_dir(pr) }
     # Discard directories that do not have open PRs.
     if File.exist?(base_dir)
       discard_dirs = Dir.entries(base_dir) - safe_dirs - new_clones
@@ -182,11 +230,12 @@ module Autostager
 
     # Process current PRs.
     Autostager::Timeout.timeout(timeout_seconds, GitTimeout) do
-      prs.each { |pr| process_pull pr }
+      prs['values'].each { |pr| process_pull pr }
     end
-  rescue Octokit::Unauthorized => e
+  rescue => e
     warn e.message
-    warn 'Did you export "access_token" and "repo_slug"?'
+    warn e.backtrace
+    warn 'Did you export "username" "access_token" and "repo_slug"?'
     exit(1)
   end
   # rubocop:enable MethodLength,Metrics/AbcSize
