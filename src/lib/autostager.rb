@@ -161,7 +161,8 @@ module Autostager
   end
 
   def clone_dir(pr)
-    alphafy ("#{pr['fromRef']['repository']['project']['owner']['slug']}:#{pr['fromRef']['displayId']}")
+    alphafy ("#{pr['author']['user']['slug']}:#{pr['fromRef']['displayId']}")
+
     # github
     # alphafy(pr.head.label)
   end
