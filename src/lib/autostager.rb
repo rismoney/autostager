@@ -68,15 +68,21 @@ module Autostager
   # rubocop:disable MethodLength,Metrics/AbcSize
  def process_pull(pr)
    log "#{pr['fromRef']['displayId']}"
+   from_url = (pr['fromRef']['repository']['links']['clone'].select {|key| key.to_s.match(/http/) })[0]['href']
+   to_url = (pr['toRef']['repository']['links']['clone'].select {|key| key.to_s.match(/http/) })[0]['href']
+
+   log "from #{from_url}"
+   log "to #{to_url}"
 
    p = Autostager::PullRequest.new(
      pr['fromRef']['displayId'],
-      authenticated_url(pr['fromRef']['repository']['links']['clone'][0]['href']),
+      authenticated_url(from_url),
       base_dir,
       clone_dir(pr),
-      authenticated_url(pr['fromRef']['repository']['links']['clone'][0]['href']),
-    )
-    if p.staged?
+      authenticated_url(to_url),
+   )
+
+   if p.staged?
         log "===> staged"
         p.fetch
       if pr['fromRef']['latestCommit'] != p.local_sha
