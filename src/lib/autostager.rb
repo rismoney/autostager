@@ -103,6 +103,7 @@ module Autostager
   # rubocop:enable MethodLength,Metrics/AbcSize
 
   # rubocop:disable MethodLength,Metrics/AbcSize
+
   def comment_or_close(p, pr, add_comment = true)
  
     if p.up2date?("upstream/#{pr['toRef']['displayId']}")
@@ -143,10 +144,20 @@ module Autostager
 	   :headers => { :accept => :json, content_type: :json }
 	).execute
 
+	response = RestClient::Request.new(
+	      :method => :get,
+	      :url => "https://#{git_server}/rest/api/1.0/projects/#{project}/repos/#{repo}/pull-requests/#{pr['id']}",
+	      :user => username,
+	      :password => access_token,
+	      :verify_ssl => false
+	  ).execute
+	results = JSON.parse(response.to_str)
+	pr_version=results['version']
+
 
 	response = RestClient::Request.new(
 	   :method => :post,
-	   :url => "https://#{git_server}/rest/api/1.0/projects/#{project}/repos/#{repo}/pull-requests/#{pr['id']}/decline?version=5",
+	   :url => "https://#{git_server}/rest/api/1.0/projects/#{project}/repos/#{repo}/pull-requests/#{pr['id']}/decline?version=#{pr_version}",
 	   :user => username,
 	   :password => access_token,
 	   :verify_ssl => false,
@@ -236,7 +247,17 @@ module Autostager
     end
 
     # Process current PRs.
+    
     Autostager::Timeout.timeout(timeout_seconds, GitTimeout) do
+      response = RestClient::Request.new(
+        :method => :get,
+        :url => "https://#{git_server}/rest/api/1.0/projects/#{project}/repos/#{repo}/pull-requests",
+        :user => username,
+        :password => access_token,
+        :verify_ssl => false
+      ).execute
+      prs = JSON.parse(response.to_str)
+ 
       prs['values'].each { |pr| process_pull pr }
     end
   rescue => e
