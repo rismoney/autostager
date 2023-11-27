@@ -114,17 +114,16 @@ module Autostager
           p.local_sha,
           Socket.gethostname,
         )
-        response = RestClient::Request.new(
-          :method => :post,
-          :url => "https://#{git_server}/rest/api/1.0/projects/#{project}/repos/#{repo}/pull-requests/#{pr['id']}/comments",
-          :user => username,
-          :password => access_token,
-          :verify_ssl => false,
-          :payload => {"text" => comment}.to_json,
-          :headers => { :accept => :json, content_type: :json }
-        ).execute
-
         log comment
+        
+        response = RestClient::Request.new(
+          :method => :delete,
+          :url => "https://puppet:8140/puppet-admin-api/v1/environment-cache?environment=#{clone_dir(pr)}",
+          :verify_ssl => false,
+          :headers => { content_type: :json }
+        ).execute
+        log "===> puppet cache clear on #{clone_dir(pr)}"
+
       end
     else
       comment = format(
