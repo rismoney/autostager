@@ -61,6 +61,15 @@ module Autostager
     )
     p.clone unless p.staged?
     p.fetch
+    if p.behind("upstream/master") > 0
+      response = RestClient::Request.new(
+          :method => :delete,
+          :url => "https://puppet:8140/puppet-admin-api/v1/environment-cache?environment=master",
+          :verify_ssl => false,
+          :headers => { content_type: :json }
+      ).execute
+      log "===> puppet cache clear on master"
+    end
     return if p.rebase
   end
   # rubocop:enable MethodLength,Metrics/AbcSize
@@ -252,15 +261,6 @@ module Autostager
       discard_dirs = Dir.entries(base_dir) - safe_dirs - new_clones
       discard_dirs.map { |d| File.join(base_dir, d) }.each do |dir|
         log "===> Unstage #{dir} since PR is closed."
-
-        response = RestClient::Request.new(
-          :method => :delete,
-          :url => "https://puppet:8140/puppet-admin-api/v1/environment-cache?environment=master",
-          :verify_ssl => false,
-          :headers => { content_type: :json }
-        ).execute
-        log "===> puppet cache clear on master"
-
         FileUtils.rm_rf dir, secure: true
       end
     end
