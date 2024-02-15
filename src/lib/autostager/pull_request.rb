@@ -49,7 +49,7 @@ module Autostager
     #
     # @return [Fixnum]
     def behind_threshold
-      10
+      20
     end
 
     # Is this branch within a reasonable number of commits with upstream?
