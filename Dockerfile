@@ -5,7 +5,7 @@ FROM alpine:latest
 LABEL authors="Paul Morgan <jumanjiman@gmail.com>,Rich Siegel <rsiegel@thirdpoint.com>"
 
 ENV VERSION 0.1.1
-
+ENV HOME "/tmp"
 # RUN apk update && apk add ca-certificates
 
 # COPY ssl/*.crt /usr/local/share/ca-certificates/
@@ -18,9 +18,14 @@ RUN apk add --no-cache ruby git perl && \
     gem install --local puppet-autostager-0.1.1.gem && \
     gem install json && \
     gem install rest-client && \
+    gem install puppet && \
     apk del DEV
 
 RUN adduser -D puppet
+USER 999
+RUN mkdir -p /tmp/.puppetlabs/etc/puppet && \
+    touch /tmp/.puppetlabs/etc/puppet/puppet.conf && \
+    puppet config set environmentpath '/etc/puppetlabs/code/environments'
 
 ENTRYPOINT ["autostager"]
 
