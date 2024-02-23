@@ -6,11 +6,11 @@ LABEL authors="Paul Morgan <jumanjiman@gmail.com>,Rich Siegel <rsiegel@thirdpoin
 
 ENV VERSION 0.1.1
 ENV HOME "/tmp"
-# RUN apk update && apk add ca-certificates
+RUN apk update && apk add ca-certificates
 
-# COPY ssl/*.crt /usr/local/share/ca-certificates/
+COPY certs/*.crt /usr/local/share/ca-certificates/
 
-# RUN update-ca-certificates
+RUN update-ca-certificates
 
 COPY /src/puppet-autostager-0.1.1.gem .
 
