@@ -113,7 +113,8 @@ module Autostager
 
     def pupgen
       log 'puppet generate types'
-      `puppet generate types --environment #{@branch}`
+       @basename = File.basename(@staging_dir)
+      `puppet generate types --environment #{@basename}`
     end
 
     def clone
