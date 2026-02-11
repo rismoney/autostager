@@ -6,8 +6,8 @@ require 'autostager/logger'
 require 'autostager/pull_request'
 require 'autostager/timeout'
 require 'autostager/version'
-require 'json'
-require 'rest-client'
+require 'autostager/backends/github'
+require 'autostager/backends/bitbucket'
 require 'pp'
 
 # Top-level module namespace.
@@ -17,16 +17,21 @@ module Autostager
 
   extend Autostager::Logger
 
-  def username
-    ENV['username']
+  # Select backend based on git_backend environment variable
+  # Defaults to 'github' for backward compatibility
+  def git_backend
+    ENV['git_backend'] || 'github'
   end
 
-  def access_token
-    ENV['access_token']
-  end
-
-  def git_server
-    ENV['git_server'] || 'github.com'
+  def backend
+    @backend ||= case git_backend.downcase
+                 when 'github'
+                   Autostager::Backends::GitHub
+                 when 'bitbucket'
+                   Autostager::Backends::Bitbucket
+                 else
+                   raise "Unknown git_backend: #{git_backend}. Valid options: github, bitbucket"
+                 end
   end
 
   # Convert a string into purely alphanumeric characters
@@ -38,15 +43,7 @@ module Autostager
   # This is usually master in git, but
   # could also be "production" for a puppet repo.
   def default_branch
-    response = RestClient::Request.new(
-      :method => :get,
-      :url => "https://#{git_server}/rest/api/1.0/projects/#{project}/repos/#{repo}/branches/default",
-      :user => username,
-      :password => access_token,
-      :verify_ssl => false
-    ).execute
-    results = JSON.parse(response.to_str)
-    results['displayId']
+    backend.default_branch
   end
 
   # rubocop:disable MethodLength,Metrics/AbcSize
@@ -54,57 +51,62 @@ module Autostager
     log "===> begin #{default_branch}"
     p = Autostager::PullRequest.new(
       default_branch,
-      authenticated_url("https://#{git_server}/scm/#{repo_slug}"),
+      backend.authenticated_url(backend.repo_url),
       base_dir,
       default_branch,
-      authenticated_url("https://#{git_server}/scm/#{repo_slug}"),
+      backend.authenticated_url(backend.repo_url),
     )
     p.clone unless p.staged?
     p.fetch
-    if p.behind("upstream/master") > 0
-      response = RestClient::Request.new(
-          :method => :delete,
-          :url => "https://puppet:8140/puppet-admin-api/v1/environment-cache?environment=master",
-          :verify_ssl => false,
-          :headers => { content_type: :json }
-      ).execute
-      log "===> puppet cache clear on master"
+
+    # Clear puppet cache if backend supports it and branch is behind
+    if backend.supports_puppet_cache_clear? && p.behind('upstream/master') > 0
+      backend.clear_puppet_cache('master')
+      log '===> puppet cache clear on master'
     end
+
     return if p.rebase
+
+    # fast-forward failed, so raise awareness (GitHub only)
+    backend.create_issue(
+      "Failed to fast-forward #{default_branch} branch",
+      ':bangbang: This probably means somebody force-pushed to the branch.',
+    )
   end
   # rubocop:enable MethodLength,Metrics/AbcSize
 
   # rubocop:disable MethodLength,Metrics/AbcSize
- def process_pull(pr)
-   log "#{pr['fromRef']['displayId']}"
-   from_url = (pr['fromRef']['repository']['links']['clone'].select {|key| key.to_s.match(/http/) })[0]['href']
-   to_url = (pr['toRef']['repository']['links']['clone'].select {|key| key.to_s.match(/http/) })[0]['href']
+  def process_pull(pr)
+    log "===> #{backend.pr_id(pr)} #{clone_dir(pr)}"
 
-   log "from #{from_url}"
-   log "to #{to_url}"
+    from_url = backend.from_clone_url(pr)
+    to_url = backend.to_clone_url(pr)
 
-   p = Autostager::PullRequest.new(
-     pr['fromRef']['displayId'],
-      authenticated_url(from_url),
+    log "from #{from_url}"
+    log "to #{to_url}"
+
+    p = Autostager::PullRequest.new(
+      backend.pr_branch(pr),
+      backend.authenticated_url(from_url),
       base_dir,
       clone_dir(pr),
-      authenticated_url(to_url),
-   )
+      backend.authenticated_url(to_url),
+    )
 
-   if p.staged?
-        log "===> staged"
-        p.fetch
-      if pr['fromRef']['latestCommit'] != p.local_sha
-        log "===> reset hard"
+    if p.staged?
+      log '===> staged'
+      p.fetch
+      if backend.pr_sha(pr) != p.local_sha
+        log '===> reset hard'
         p.reset_hard
         add_comment = true
       else
-        log "nothing to do on #{pr['id']} #{staging_dir(pr)}"
+        log "nothing to do on #{backend.pr_id(pr)} #{staging_dir(pr)}"
         add_comment = false
       end
       comment_or_close(p, pr, add_comment)
     else
-        log "===> clone"
+      log '===> clone'
       p.clone
       comment_or_close(p, pr)
     end
@@ -112,10 +114,8 @@ module Autostager
   # rubocop:enable MethodLength,Metrics/AbcSize
 
   # rubocop:disable MethodLength,Metrics/AbcSize
-
   def comment_or_close(p, pr, add_comment = true)
- 
-    if p.up2date?("upstream/#{pr['toRef']['displayId']}")
+    if p.up2date?("upstream/#{backend.pr_base_branch(pr)}")
       if add_comment
         comment = format(
           ':bell: Staged `%s` at revision %s on %s',
@@ -124,26 +124,14 @@ module Autostager
           Socket.gethostname,
         )
 
-        response = RestClient::Request.new(
-          :method => :post,
-          :url => "https://#{git_server}/rest/api/1.0/projects/#{project}/repos/#{repo}/pull-requests/#{pr['id']}/comments",
-          :user => username,
-          :password => access_token,
-          :verify_ssl => false,
-          :payload => {"text" => comment}.to_json,
-          :headers => { :accept => :json, content_type: :json }
-        ).execute
-
+        backend.add_comment(pr, comment)
         log comment
 
-        response = RestClient::Request.new(
-          :method => :delete,
-          :url => "https://puppet:8140/puppet-admin-api/v1/environment-cache?environment=#{clone_dir(pr)}",
-          :verify_ssl => false,
-          :headers => { content_type: :json }
-        ).execute
-        log "===> puppet cache clear on #{clone_dir(pr)}"
-
+        # Clear puppet cache if backend supports it
+        if backend.supports_puppet_cache_clear?
+          backend.clear_puppet_cache(clone_dir(pr))
+          log "===> puppet cache clear on #{clone_dir(pr)}"
+        end
       end
     else
       comment = format(
@@ -152,71 +140,23 @@ module Autostager
       )
       FileUtils.rm_rf staging_dir(pr), secure: true
 
-
-  response = RestClient::Request.new(
-     :method => :post,
-     :url => "https://#{git_server}/rest/api/1.0/projects/#{project}/repos/#{repo}/pull-requests/#{pr['id']}/comments",
-     :user => username,
-     :password => access_token,
-     :verify_ssl => false,
-     :payload => {"text" => comment}.to_json,
-     :headers => { :accept => :json, content_type: :json }
-  ).execute
-
-  response = RestClient::Request.new(
-        :method => :get,
-        :url => "https://#{git_server}/rest/api/1.0/projects/#{project}/repos/#{repo}/pull-requests/#{pr['id']}",
-        :user => username,
-        :password => access_token,
-        :verify_ssl => false
-    ).execute
-  results = JSON.parse(response.to_str)
-  pr_version=results['version']
-
-
-  response = RestClient::Request.new(
-     :method => :post,
-     :url => "https://#{git_server}/rest/api/1.0/projects/#{project}/repos/#{repo}/pull-requests/#{pr['id']}/decline?version=#{pr_version}",
-     :user => username,
-     :password => access_token,
-     :verify_ssl => false,
-     :headers => {content_type: :json }
-  ).execute
-
+      backend.add_comment(pr, comment)
+      backend.close_pr(pr)
       log comment
     end
   end
   # rubocop:enable MethodLength,Metrics/AbcSize
-
-  def authenticated_url(s)
-    s.dup.sub!(%r{^(https://)(.*)}, '\1' + username + ':' + access_token + '@\2')
-  end
 
   def base_dir
     ENV['base_dir'] || '/opt/puppet/environments'
   end
 
   def clone_dir(pr)
-    alphafy ("#{pr['author']['user']['slug']}:#{pr['fromRef']['displayId']}")
-
-    # github
-    # alphafy(pr.head.label)
+    alphafy(backend.pr_author_label(pr))
   end
 
   def staging_dir(pr)
     File.join base_dir, clone_dir(pr)
-  end
-
-  def repo_slug
-    ENV['repo_slug']
-  end
-
-  def project
-    repo_slug.split("/")[0]
-  end
-
-  def repo
-    repo_slug.split("/")[1]
   end
 
   def timeout_seconds
@@ -241,21 +181,19 @@ module Autostager
 
   # rubocop:disable MethodLength,Metrics/AbcSize
   def run
-    user = username
+    log "===> Using #{git_backend} backend"
+    backend.init
 
     # Handle the default branch differently because
     # we only ever rebase, never force-push.
     stage_upstream
+
     # Get open PRs.
-    response = RestClient::Request.new(
-      :method => :get,
-      :url => "https://#{git_server}/rest/api/1.0/projects/#{project}/repos/#{repo}/pull-requests",
-      :user => username,
-      :password => access_token,
-      :verify_ssl => false
-    ).execute
-    prs = JSON.parse(response.to_str)
-    new_clones = prs['values'].map { |pr| clone_dir(pr) }
+    prs = backend.fetch_pull_requests
+
+    # Set of PR clone dirs.
+    new_clones = prs.map { |pr| clone_dir(pr) }
+
     # Discard directories that do not have open PRs.
     if File.exist?(base_dir)
       discard_dirs = Dir.entries(base_dir) - safe_dirs - new_clones
@@ -266,23 +204,13 @@ module Autostager
     end
 
     # Process current PRs.
-    
     Autostager::Timeout.timeout(timeout_seconds, GitTimeout) do
-      response = RestClient::Request.new(
-        :method => :get,
-        :url => "https://#{git_server}/rest/api/1.0/projects/#{project}/repos/#{repo}/pull-requests",
-        :user => username,
-        :password => access_token,
-        :verify_ssl => false
-      ).execute
-      prs = JSON.parse(response.to_str)
- 
-      prs['values'].each { |pr| process_pull pr }
+      prs.each { |pr| process_pull pr }
     end
-  rescue => e
+  rescue backend.error_class => e
     warn e.message
-    warn e.backtrace
-    warn 'Did you export "username" "access_token" and "repo_slug"?'
+    warn e.backtrace if e.respond_to?(:backtrace)
+    warn backend.error_message
     exit(1)
   end
   # rubocop:enable MethodLength,Metrics/AbcSize
