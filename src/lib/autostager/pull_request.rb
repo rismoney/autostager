@@ -49,7 +49,7 @@ module Autostager
     #
     # @return [Fixnum]
     def behind_threshold
-      10
+      20
     end
 
     # Is this branch within a reasonable number of commits with upstream?
@@ -72,6 +72,7 @@ module Autostager
       `git rebase origin/#{@branch} &> /dev/null`
       status = $CHILD_STATUS.exitstatus
       update_submodules
+      pupgen
       log "#{@branch} is at revision #{local_sha}"
       status
     end
@@ -80,6 +81,7 @@ module Autostager
       Dir.chdir @staging_dir
       `git reset --hard origin/#{@branch} &> /dev/null`
       update_submodules
+      pupgen
     end
 
     def fetch
@@ -109,6 +111,12 @@ module Autostager
       `git fetch --prune upstream &> /dev/null`
     end
 
+    def pupgen
+      log 'puppet generate types'
+       @basename = File.basename(@staging_dir)
+      `puppet generate types --environment #{@basename}`
+    end
+
     def clone
       log "clone to #{@staging_dir}"
       FileUtils.mkdir_p @base_dir unless File.exist?(@base_dir)
@@ -116,6 +124,7 @@ module Autostager
       Dir.chdir @staging_dir
       add_upstream_remote
       update_submodules
+      pupgen
     end
   end
 end

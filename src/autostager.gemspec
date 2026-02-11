@@ -30,4 +30,5 @@ Gem::Specification.new do |spec|
 
   spec.add_dependency 'json'
   spec.add_dependency 'octokit', '~> 4.9'
+  spec.add_dependency 'rest-client'
 end
