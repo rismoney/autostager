@@ -61,7 +61,11 @@ module Autostager
     )
     p.clone unless p.staged?
     p.fetch
-    if p.behind("upstream/master") > 0
+    behind = p.behind("upstream/master") > 0
+    p.rebase
+    # Flush only after the new code is on disk; flushing earlier lets a
+    # compile during the rebase re-cache a stale module list indefinitely.
+    if behind
       response = RestClient::Request.new(
           :method => :delete,
           :url => "https://puppet:8140/puppet-admin-api/v1/environment-cache?environment=master",
@@ -70,7 +74,6 @@ module Autostager
       ).execute
       log "===> puppet cache clear on master"
     end
-    return if p.rebase
   end
   # rubocop:enable MethodLength,Metrics/AbcSize
 
